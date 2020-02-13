@@ -100,10 +100,20 @@ NNVM_REGISTER_OP(_npi_cross)
 })
 .set_attr<THasDeterministicOutput>("THasDeterministicOutput", true)
 .set_attr<FCompute>("FCompute<cpu>", NumpyCrossForward<cpu>)
-.set_attr<nnvm::FGradient>("FGradient", MakeZeroGradNodes)
+.set_attr<nnvm::FGradient>("FGradient", ElemwiseGradUseIn{"_backward_npi_cross"})
 .add_argument("a", "NDArray-or-Symbol", "First vector")
 .add_argument("b", "NDArray-or-Symbol", "Second vector")
 .add_arguments(NumpyCrossParam::__FIELDS__());
+
+NNVM_REGISTER_OP(_backward_npi_cross)
+.set_attr_parser(ParamParser<NumpyCrossParam>)
+.set_num_inputs(3)
+.set_num_outputs(2)
+.set_attr<nnvm::TIsBackward>("TIsBackward", true)
+.set_attr<FResourceRequest>("FResourceRequest", [](const NodeAttrs& attrs) {
+  return std::vector<ResourceRequest>(1, ResourceRequest::kTempSpace);
+})
+.set_attr<FCompute>("FCompute<cpu>", NumpyCrossBackward<cpu>);
 
 }  // namespace op
 }  // namespace mxnet

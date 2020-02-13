@@ -566,6 +566,29 @@ void NumpyCrossForward(const nnvm::NodeAttrs& attrs,
   });
 }
 
+template <typename xpu>
+void NumpyCrossBackward(const nnvm::NodeAttrs &attrs,
+                        const OpContext &ctx,
+                        const std::vector<TBlob> &inputs,
+                        const std::vector<OpReqType> &req,
+                        const std::vector<TBlob> &outputs) {
+  using namespace mshadow;
+  CHECK_EQ(inputs.size(), 3U);
+  CHECK_EQ(outputs.size(), 2U);
+  CHECK_EQ(req.size(), 2U);
+
+  Stream<xpu> *s = ctx.get_stream<xpu>();
+  const TBlob& grad_c = inputs[0];
+  const TBlob& a = inputs[1];
+  const TBlob& b = inputs[2];
+  const TBlob& grad_a = outputs[0];
+  const TBlob& grad_b = outputs[1];
+
+  // if (kNullOp == req[0]) { return; }
+  // // Zero-size output, no need to launch kernel
+  // if (0U == a.Size() || 0U == b.Size()) { return; }
+}
+
 }  // namespace op
 }  // namespace mxnet
 
