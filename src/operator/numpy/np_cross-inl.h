@@ -41,6 +41,43 @@ namespace op {
 
 using namespace mshadow;
 
+inline void PrintData(const mxnet::TShape& shape,
+                      const std::string& name) {
+  std::cout << name << "_shape: (";
+  if (shape.ndim() >= 1) {
+    for (int i = 0; i < shape.ndim() - 1; ++i) { std::cout << shape[i] << ", "; }
+    std::cout << shape[shape.ndim() - 1];
+  }
+  std::cout << ")" << std::endl;
+}
+
+template<typename DType>
+inline void PrintData(const mxnet::Tuple<DType>& tup,
+                      const std::string& name) {
+  std::cout << name << "_tuple: (";
+  if (tup.ndim() >= 1) {
+    for (int i = 0; i < tup.ndim() - 1; ++i) { std::cout << tup[i] << ", "; }
+    std::cout << tup[tup.ndim() - 1];
+  }
+  std::cout << ")" << std::endl;
+}
+
+struct PrintHelper {
+  template<typename DType>
+  MSHADOW_XINLINE static void Map(int i, const DType *in_data) {
+    printf("%lf, ", static_cast<double>(in_data[i]));
+  }
+};
+
+template<typename xpu, typename DType>
+inline void PrintTBlob(const std::string& name, const TBlob& data, Stream<xpu> *s = nullptr) {
+  std::cout << name << ": ";
+  mxnet_op::Kernel<PrintHelper, xpu>::Launch(s, data.Size(), data.dptr<DType>());
+  s->Wait();
+  std::cout << std::endl;
+  s->Wait();
+}
+
 struct NumpyCrossParam : public dmlc::Parameter<NumpyCrossParam> {
   int axisa, axisb, axisc;
   DMLC_DECLARE_PARAMETER(NumpyCrossParam) {
@@ -154,6 +191,15 @@ struct ResAssign {
   }
 };
 
+// template<int req, int a_dim, int b_dim>
+// struct CrossBackwardAssign {
+//   template<typename DType>
+//   MSHADOW_XINLINE static void Map(int i, const DType *grad_c, const DType *a, const DType *b,
+//                                   DType *grad_a, DType *grad_b,
+//                                   const int asize, const int bsize, const int csize) {
+//   }
+// };
+
 template<typename DType>
 inline size_t AligndWorkspaceSize(const size_t& offset,
                                   const size_t& add_size) {
@@ -168,7 +214,8 @@ inline size_t NumpyCrossWorkspaceSize(const mxnet::TShape& a_moveaxis_shape,
                                       const mxnet::TShape& b_moveaxis_shape,
                                       const mxnet::TShape& c_moveaxis_shape,
                                       const mxnet::TShape& c_shape,
-                                      const nnvm::NodeAttrs& attrs,
+                                      const int& a_axis,
+                                      const int& b_axis,
                                       const OpContext& ctx,
                                       const std::vector<OpReqType>& req) {
   if (kNullOp == req[0]) { return 0U; }
@@ -176,12 +223,9 @@ inline size_t NumpyCrossWorkspaceSize(const mxnet::TShape& a_moveaxis_shape,
   if (0U == a_moveaxis_shape.Size() || 0U == b_moveaxis_shape.Size()) { return 0U; }
 
   size_t workspace_size = 0;
-  const NumpyCrossParam& param = nnvm::get<NumpyCrossParam>(attrs.parsed);
   const int a_ndim = a_moveaxis_shape.ndim();
   const int b_ndim = b_moveaxis_shape.ndim();
   const int c_ndim = c_moveaxis_shape.ndim();
-  const int a_axis = CheckAxis(param.axisa, a_ndim);
-  const int b_axis = CheckAxis(param.axisb, b_ndim);
 
   if (ctx.run_ctx.get_ctx().dev_mask() == cpu::kDevMask) {
     if (a_moveaxis_shape[a_ndim - 1] == 2 && b_moveaxis_shape[b_ndim - 1] == 2) {
@@ -239,6 +283,9 @@ struct NumpyCrossForwardImpl {
                  const TBlob& c,
                  const std::vector<Tuple<int> >& moveaxis_index_vec,
                  const std::vector<mxnet::TShape>& moveaxis_shape_vec,
+                 const int a_axis,
+                 const int b_axis,
+                 const int c_axis,
                  const nnvm::NodeAttrs& attrs,
                  const OpContext& ctx,
                  const std::vector<OpReqType>& req,
@@ -246,7 +293,6 @@ struct NumpyCrossForwardImpl {
     CHECK(a_dim == 3 || b_dim == 3)
       << "no specialized NumpyCrossOp defined for template parameters.";
     Stream<xpu> *s = ctx.get_stream<xpu>();
-    const NumpyCrossParam& param = nnvm::get<NumpyCrossParam>(attrs.parsed);
     const Tuple<int>& a_moveaxis_index = moveaxis_index_vec[0];
     const Tuple<int>& b_moveaxis_index = moveaxis_index_vec[1];
     const mxnet::TShape& a_moveaxis_shape = moveaxis_shape_vec[0];
@@ -255,9 +301,6 @@ struct NumpyCrossForwardImpl {
     const int a_ndim = a_moveaxis_shape.ndim();
     const int b_ndim = b_moveaxis_shape.ndim();
     const int c_ndim = b_moveaxis_shape.ndim();
-    const int a_axis = CheckAxis(param.axisa, a_ndim);
-    const int b_axis = CheckAxis(param.axisb, b_ndim);
-    const int c_axis = CheckAxis(param.axisc, c_ndim);
     CHECK_EQ(c_moveaxis_shape[c_ndim - 1], 3)
       << "no specialized NumpyCrossOp defined for template parameters.";
 
@@ -379,7 +422,7 @@ struct NumpyCrossForwardImpl {
     cw_data = cw_data.reshape(c.shape_);
     const DType *res_ptr = c_data.dptr<DType>();
     if (c_axis != c_ndim -1) {
-      const Tuple<int> c_axis_index = GetMoveaxisIndex(-1, param.axisc, c_moveaxis_shape);
+      const Tuple<int> c_axis_index = GetMoveaxisIndex(-1, c_axis, c_moveaxis_shape);
       TransposeImpl<xpu>(ctx.run_ctx, c_data, cw_data,
                          mxnet::TShape(c_axis_index.begin(), c_axis_index.end()));
       res_ptr = cw_data.dptr<DType>();
@@ -398,12 +441,13 @@ struct NumpyCrossForwardImpl<xpu, DType, 2, 2> {
                  const TBlob& c,
                  const std::vector<Tuple<int> >& moveaxis_index_vec,
                  const std::vector<mxnet::TShape>& moveaxis_shape_vec,
+                 const int a_axis,
+                 const int b_axis,
                  const nnvm::NodeAttrs& attrs,
                  const OpContext& ctx,
                  const std::vector<OpReqType>& req,
                  const Tensor<xpu, 1, DType>& workspace) {
     Stream<xpu> *s = ctx.get_stream<xpu>();
-    const NumpyCrossParam& param = nnvm::get<NumpyCrossParam>(attrs.parsed);
     const Tuple<int>& a_moveaxis_index = moveaxis_index_vec[0];
     const Tuple<int>& b_moveaxis_index = moveaxis_index_vec[1];
     const mxnet::TShape& a_moveaxis_shape = moveaxis_shape_vec[0];
@@ -411,8 +455,6 @@ struct NumpyCrossForwardImpl<xpu, DType, 2, 2> {
     const mxnet::TShape& c_shape = c.shape_;
     const int a_ndim = a_moveaxis_shape.ndim();
     const int b_ndim = b_moveaxis_shape.ndim();
-    const int a_axis = CheckAxis(param.axisa, a_ndim);
-    const int b_axis = CheckAxis(param.axisb, b_ndim);
 
     TBlob aw_data, bw_data, cw_data, a_data, b_data;
     if (ctx.run_ctx.get_ctx().dev_mask() == cpu::kDevMask) {
@@ -515,18 +557,22 @@ void NumpyCrossForward(const nnvm::NodeAttrs& attrs,
   // Zero-size output, no need to launch kernel
   if (0U == a.Size() || 0U == b.Size()) { return; }
 
+  const NumpyCrossParam& param = nnvm::get<NumpyCrossParam>(attrs.parsed);
   const mxnet::TShape& a_shape = a.shape_;
   const mxnet::TShape& b_shape = b.shape_;
   const mxnet::TShape& c_shape = c.shape_;
   const int a_ndim = a_shape.ndim();
   const int b_ndim = b_shape.ndim();
-  const NumpyCrossParam& param = nnvm::get<NumpyCrossParam>(attrs.parsed);
+  const int c_ndim = c_shape.ndim();
   Tuple<int> a_moveaxis_index = GetMoveaxisIndex(param.axisa, -1, a_shape);
   Tuple<int> b_moveaxis_index = GetMoveaxisIndex(param.axisb, -1, b_shape);
   Tuple<int> c_moveaxis_index = GetMoveaxisIndex(param.axisc, -1, c_shape);
   mxnet::TShape a_moveaxis_shape = GetMoveaxisShape(a_moveaxis_index, a_shape);
   mxnet::TShape b_moveaxis_shape = GetMoveaxisShape(b_moveaxis_index, b_shape);
   mxnet::TShape c_moveaxis_shape = GetMoveaxisShape(c_moveaxis_index, c_shape);
+  const int a_axis = CheckAxis(param.axisa, a_ndim);
+  const int b_axis = CheckAxis(param.axisb, b_ndim);
+  const int c_axis = CheckAxis(param.axisc, c_ndim);
   const std::vector<mxnet::TShape > shape_vec({ a_moveaxis_shape, b_moveaxis_shape,
                                                 c_moveaxis_shape });
   const std::vector<Tuple<int> > index_vec({ a_moveaxis_index, b_moveaxis_index,
@@ -538,33 +584,135 @@ void NumpyCrossForward(const nnvm::NodeAttrs& attrs,
                                                                 b_moveaxis_shape,
                                                                 c_moveaxis_shape,
                                                                 c_shape,
-                                                                attrs, ctx, req);
+                                                                a_axis, b_axis, ctx, req);
     Tensor<xpu, 1, DType> workspace = ctx.requested[0].get_space_typed<xpu, 1, DType>(
       Shape1(workspace_size), s);
 
     if (a_moveaxis_shape[a_ndim - 1] == 2) {
       if (b_moveaxis_shape[b_ndim - 1] == 2) {
         // Case 1: a.shape[-1] == 2 and b.shape[-1] == 2, param.axisc is ignored.
-        NumpyCrossForwardImpl<xpu, DType, 2, 2>::op(a, b, c, index_vec, shape_vec, attrs,
-                                                    ctx, req, workspace);
+        NumpyCrossForwardImpl<xpu, DType, 2, 2>::op(a, b, c, index_vec, shape_vec,
+                                                    a_axis, b_axis, attrs, ctx, req, workspace);
       } else {
         // Case 2: a.shape[-1] == 2 and b.shape[-1] == 3, param.axisc is not ignored.
-        NumpyCrossForwardImpl<xpu, DType, 2, 3>::op(a, b, c, index_vec, shape_vec, attrs,
-                                                    ctx, req, workspace);
+        NumpyCrossForwardImpl<xpu, DType, 2, 3>::op(a, b, c, index_vec, shape_vec,
+                                                    a_axis, b_axis, c_axis,
+                                                    attrs, ctx, req, workspace);
       }
     } else {
       if (b_moveaxis_shape[b_ndim - 1] == 2) {
         // Case 3: a.shape[-1] == 3 and b.shape[-1] == 2, param.axisc is not ignored.
-        NumpyCrossForwardImpl<xpu, DType, 3, 2>::op(a, b, c, index_vec, shape_vec, attrs,
-                                                    ctx, req, workspace);
+        NumpyCrossForwardImpl<xpu, DType, 3, 2>::op(a, b, c, index_vec, shape_vec,
+                                                    a_axis, b_axis, c_axis,
+                                                    attrs, ctx, req, workspace);
       } else {
         // Case 4: a.shape[-1] == 3 and b.shape[-1] == 3, param.axisc is not ignored.
-        NumpyCrossForwardImpl<xpu, DType, 3, 3>::op(a, b, c, index_vec, shape_vec, attrs,
-                                                    ctx, req, workspace);
+        NumpyCrossForwardImpl<xpu, DType, 3, 3>::op(a, b, c, index_vec, shape_vec,
+                                                    a_axis, b_axis, c_axis,
+                                                    attrs, ctx, req, workspace);
       }
     }
   });
 }
+
+template<typename xpu, typename DType>
+inline size_t NumpyCrossBackwardWorkspaceSize(const mxnet::TShape& a_moveaxis_shape,
+                                              const mxnet::TShape& b_moveaxis_shape,
+                                              const mxnet::TShape& c_moveaxis_shape,
+                                              const int& a_axis,
+                                              const int& b_axis,
+                                              const int& c_axis,
+                                              const OpContext& ctx,
+                                              const std::vector<OpReqType>& req) {
+  if (kNullOp == req[0] && kNullOp == req[1]) { return 0U; }
+  // Zero-size output, no need to launch kernel
+  if (0U == c_moveaxis_shape.Size()) { return 0U; }
+
+  size_t workspace_size = 0;
+  const int a_ndim = a_moveaxis_shape.ndim();
+  const int b_ndim = b_moveaxis_shape.ndim();
+  if (ctx.run_ctx.get_ctx().dev_mask() == cpu::kDevMask) {
+    if (a_moveaxis_shape[a_ndim - 1] == 2 &&  b_moveaxis_shape[b_ndim - 1] == 2) {
+      // Case 1: a.shape[-1] == 2 and b.shape[-1] == 2, param.axisc is ignored.
+    } else {
+      // Case 2, 3, 4: a.shape[-1] == 3 or b.shape[-1] == 3, param.axisc is not ignored.
+      if (a_moveaxis_shape[a_ndim - 1] == 3 &&  b_moveaxis_shape[b_ndim - 1] == 3) {
+        size_t ws1 = NumpyCrossWorkspaceSize()
+      }
+    }
+  } else {
+    // if (a_moveaxis_shape[a_ndim - 1] == 3 || b_moveaxis_shape[b_ndim - 1] == 3) {
+    //   // Case 2, 3, 4: a.shape[-1] == 3 or b.shape[-1] == 3, param.axisc is not ignored.
+    //   workspace_size = AligndWorkspaceSize<DType>(workspace_size,
+    //                                               c_moveaxis_shape.Size());
+    // }
+    // if (a_axis != a_ndim -1 || b_axis != b_ndim - 1) {
+    //   workspace_size = AligndWorkspaceSize<DType>(workspace_size,
+    //                                               a_moveaxis_shape.Size());
+    //   workspace_size = AligndWorkspaceSize<DType>(workspace_size,
+    //                                               b_moveaxis_shape.Size());
+    // }
+  }
+  return workspace_size;
+}
+
+// template<typename xpu, typename DType, int a_dim, int b_dim>
+// struct NumpyCrossBackwardImpl {
+//   static void op(const TBlob& grad_c,
+//                  const TBlob& a,
+//                  const TBlob& b,
+//                  const TBlob& grad_a,
+//                  const TBlob& grad_b,
+//                  const std::vector<Tuple<int> >& moveaxis_index_vec,
+//                  const std::vector<mxnet::TShape>& moveaxis_shape_vec,
+//                  const int a_axis,
+//                  const int b_axis,
+//                  const OpContext& ctx,
+//                  const std::vector<OpReqType>& req,
+//                  const Tensor<xpu, 1, DType>& workspace) {
+    
+//   }
+// };
+
+// template<typename xpu, typename DType>
+// struct NumpyCrossBackwardImpl<xpu, DType, 2, 2> {
+//   static void op(const TBlob& grad_c,
+//                  const TBlob& a,
+//                  const TBlob& b,
+//                  const TBlob& grad_a,
+//                  const TBlob& grad_b,
+//                  const std::vector<Tuple<int> >& moveaxis_index_vec,
+//                  const std::vector<mxnet::TShape>& moveaxis_shape_vec,
+//                  const int a_axis,
+//                  const int b_axis,
+//                  const OpContext& ctx,
+//                  const std::vector<OpReqType>& req,
+//                  const Tensor<xpu, 1, DType>& workspace) {
+//     Stream<xpu> *s = ctx.get_stream<xpu>();
+//     const Tuple<int>& a_moveaxis_index = moveaxis_index_vec[0];
+//     const Tuple<int>& b_moveaxis_index = moveaxis_index_vec[1];
+//     const mxnet::TShape& a_moveaxis_shape = moveaxis_shape_vec[0];
+//     const mxnet::TShape& b_moveaxis_shape = moveaxis_shape_vec[1];
+//     const int a_ndim = a_moveaxis_shape.ndim();
+//     const int b_ndim = b_moveaxis_shape.ndim();
+
+//     TBlob a_data = a, b_data = b;
+//     if (a_axis != a_ndim -1 || b_axis != b_ndim - 1) {
+//       if (ctx.run_ctx.get_ctx().dev_mask() == cpu::kDevMask) {
+//         // Allocate workspace in cpu, no need to align address.
+//         DType *a_ptr = workspace.dptr_;
+//         DType *b_ptr = workspace.dptr_ + a_moveaxis_shape.Size();
+//         a_data = TBlob(a_ptr, a_moveaxis_shape, a.dev_mask(), a.dev_id());
+//         b_data = TBlob(b_ptr, b_moveaxis_shape, b.dev_mask(), b.dev_id());
+//         TransposeImpl<xpu>(ctx.run_ctx, a, a_data,
+//                           mxnet::TShape(a_moveaxis_index.begin(), a_moveaxis_index.end()));
+//         TransposeImpl<xpu>(ctx.run_ctx, b, b_data,
+//                           mxnet::TShape(b_moveaxis_index.begin(), b_moveaxis_index.end()));
+//       } else {
+//       }
+//     }
+//   }
+// };
 
 template <typename xpu>
 void NumpyCrossBackward(const nnvm::NodeAttrs &attrs,
@@ -584,9 +732,90 @@ void NumpyCrossBackward(const nnvm::NodeAttrs &attrs,
   const TBlob& grad_a = outputs[0];
   const TBlob& grad_b = outputs[1];
 
-  // if (kNullOp == req[0]) { return; }
-  // // Zero-size output, no need to launch kernel
-  // if (0U == a.Size() || 0U == b.Size()) { return; }
+  if (kNullOp == req[0] && kNullOp == req[1]) { return; }
+  // Zero-size output, no need to launch kernel
+  if (0U == grad_c.Size()) { return; }
+
+  const mxnet::TShape& a_shape = a.shape_;
+  const mxnet::TShape& b_shape = b.shape_;
+  const mxnet::TShape& c_shape = grad_c.shape_;
+  const int a_ndim = a_shape.ndim();
+  const int b_ndim = b_shape.ndim();
+  const int c_ndim = c_shape.ndim();
+  const NumpyCrossParam& param = nnvm::get<NumpyCrossParam>(attrs.parsed);
+  Tuple<int> a_moveaxis_index = GetMoveaxisIndex(param.axisa, -1, a_shape);
+  Tuple<int> b_moveaxis_index = GetMoveaxisIndex(param.axisb, -1, b_shape);
+  Tuple<int> c_moveaxis_index = GetMoveaxisIndex(param.axisc, -1, c_shape);
+  mxnet::TShape a_moveaxis_shape = GetMoveaxisShape(a_moveaxis_index, a_shape);
+  mxnet::TShape b_moveaxis_shape = GetMoveaxisShape(b_moveaxis_index, b_shape);
+  mxnet::TShape c_moveaxis_shape = GetMoveaxisShape(c_moveaxis_index, c_shape);
+  const int a_axis = CheckAxis(param.axisa, a_ndim);
+  const int b_axis = CheckAxis(param.axisb, b_ndim);
+  const int c_axis = CheckAxis(param.axisc, c_ndim);
+
+  PrintData(a_moveaxis_shape, "a_moveaxis");
+  PrintData(b_moveaxis_shape, "b_moveaxis");
+  PrintData(c_moveaxis_shape, "c_moveaxis");
+
+  MSHADOW_SGL_DBL_TYPE_SWITCH(grad_c.type_flag_, DType, {
+    // Calculate workspace.
+    // size_t workspace_size = NumpyCrossBackwardWorkspaceSize<xpu, DType>(a_moveaxis_shape,
+    //                                                                     b_moveaxis_shape,
+    //                                                                     c_moveaxis_shape,
+    //                                                                     a_axis, b_axis, c_axis,
+    //                                                                     ctx, req);
+    // Tensor<xpu, 1, DType> workspace = ctx.requested[0].get_space_typed<xpu, 1, DType>(
+    //   Shape1(workspace_size), s);
+
+    if (a_moveaxis_shape[a_ndim - 1] == 2) {
+      if (b_moveaxis_shape[b_ndim - 1] == 2) {
+        // Case 1: a.shape[-1] == 2 and b.shape[-1] == 2, param.axisc is ignored.
+        // NumpyCrossBackwardImpl<xpu, DType, 2, 2>::op(grad_c, a, b, grad_a, grad_b,
+        //                                              { a_moveaxis_index, b_moveaxis_index },
+        //                                              { a_moveaxis_shape, b_moveaxis_shape },
+        //                                              a_axis, b_axis,
+        //                                              ctx, req, workspace);
+      } else {
+        // Case 2: a.shape[-1] == 2 and b.shape[-1] == 3, param.axisc is not ignored.
+      }
+    } else {
+      if (b_moveaxis_shape[b_ndim - 1] == 2) {
+        // Case 3: a.shape[-1] == 3 and b.shape[-1] == 2, param.axisc is not ignored.
+      } else {
+        // Case 4: a.shape[-1] == 3 and b.shape[-1] == 3, param.axisc is not ignored.
+
+      }
+    }
+    // std::vector<Tuple<int> > index_vec;
+    // std::vector<mxnet::TShape > shape_vec;
+    // if (a_moveaxis_shape[a_ndim - 1] == 3 && b_moveaxis_shape[b_ndim - 1] == 3) {
+    //   // Case 1: a.shape[-1] == 3 and b.shape[-1] == 3, param.axisc is not ignored.
+    //   size_t grad_a_workspace_size =
+    //     NumpyCrossWorkspaceSize<xpu, DType>(b_moveaxis_shape, c_moveaxis_shape,
+    //                                         a_moveaxis_shape, a_shape,
+    //                                         b_axis, c_axis, ctx, req);
+    //   size_t grad_b_workspace_size =
+    //     NumpyCrossWorkspaceSize<xpu, DType>(c_moveaxis_shape, a_moveaxis_shape,
+    //                                         b_moveaxis_shape, b_shape,
+    //                                         c_axis, a_axis, ctx, req);
+    //   size_t workspace_size = std::max(grad_a_workspace_size, grad_b_workspace_size);
+    //   Tensor<xpu, 1, DType> workspace =
+    //     ctx.requested[0].get_space_typed<xpu, 1, DType>(Shape1(workspace_size), s);
+    //   // Calculate grad_a.
+    //   index_vec = { b_moveaxis_index, c_moveaxis_index, a_moveaxis_index };
+    //   shape_vec = { b_moveaxis_shape, c_moveaxis_shape, a_moveaxis_shape };
+    //   NumpyCrossForwardImpl<xpu, DType, 3, 3>::op(b, grad_c, grad_a, index_vec, shape_vec,
+    //                                               b_axis, c_axis, a_axis,
+    //                                               attrs, ctx, { req[0] }, workspace);
+    //   // Calculate grad_b.
+    //   index_vec = { c_moveaxis_index, a_moveaxis_index, b_moveaxis_index };
+    //   shape_vec = { c_moveaxis_shape, a_moveaxis_shape, b_moveaxis_shape };
+    //   NumpyCrossForwardImpl<xpu, DType, 3, 3>::op(grad_c, a, grad_b, index_vec, shape_vec,
+    //                                               c_axis, a_axis, b_axis,
+    //                                               attrs, ctx, { req[1] }, workspace);
+    //   return;
+    // }
+  });
 }
 
 }  // namespace op

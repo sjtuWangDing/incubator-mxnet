@@ -7558,9 +7558,119 @@ def test_np_cross():
             assert x.shape == x_expected.shape
             assert_almost_equal(x.asnumpy(), x_expected, rtol=rtol, atol=atol)
 
-    # a_shape.ndim <= 6 and b_shape.ndim <= 6
+    def check_not_use_broadcast(a_np, b_np, axises):
+        a_shape = a_np.shape
+        b_shape = b_np.shape
+        if axises is None:
+            return a_shape[:-1] == b_shape[:-1]
+        elif len(axises) == 4:
+            axis = axises[3]
+            a_moveaxis_shape = _np.moveaxis(a_np, axis, -1).shape
+            b_moveaxis_shape = _np.moveaxis(b_np, axis, -1).shape
+            return a_moveaxis_shape[:-1] == b_moveaxis_shape[:-1]
+        else:
+            a_axis = axises[0]
+            b_axis = axises[1]
+            a_moveaxis_shape = _np.moveaxis(a_np, a_axis, -1).shape
+            b_moveaxis_shape = _np.moveaxis(b_np, b_axis, -1).shape
+            return a_moveaxis_shape[:-1] == b_moveaxis_shape[:-1]
+
+    # calculate dL = gradC * dC
+    def cal_dL(grad_c_move, dc_move):
+        num = int(_np.prod(dc_move.shape))
+        grad_c_move_1d = grad_c_move.reshape((num,))
+        dc_move_1d = dc_move.reshape((num,))
+        dL = _np.inner(grad_c_move_1d, dc_move_1d)
+        return dL
+
+    # get reduced axis index
+    def get_reduce_axis(shape, broad_shape):
+        axis = list()
+        length = len(broad_shape) if len(shape) == len(broad_shape) + 1 else len(shape) - 1
+        for i in range(length):
+            if shape[i] != broad_shape[i]:
+                axis.append(i)
+        return tuple(axis) if len(axis) > 0 else None
+
+    # get grad_a and grad_b
+    def get_cross_backward(a, b, axises):
+        if axises == None:
+            a_axis, b_axis, c_axis = (-1,) * 3
+        elif len(axises) == 4:
+            a_axis, b_axis, c_axis = (axises[-1],) * 3
+        else:
+            (a_axis, b_axis, c_axis) = axises
+        c = _np.cross(a, b, axisa=a_axis, axisb=b_axis, axisc=c_axis)
+        c_move = _np.moveaxis(c, c_axis, -1) if a.shape[a_axis] == 3 or b.shape[b_axis] == 3 else c
+        grad_c_move = _np.random.uniform(-1., 1., size=c_move.shape)
+        a_move = _np.moveaxis(a, a_axis, -1)
+        b_move = _np.moveaxis(b, b_axis, -1)
+        da_move = _np.random.uniform(-1., 1., size=a_move.shape)
+        db_move = _np.random.uniform(-1., 1., size=b_move.shape)
+        # dC = dA x B + A x dB
+        dc_move = _np.cross(da_move, b_move) + _np.cross(a_move, db_move)
+        # dL1 = Tr(grad_C.T * dC) = dL/dCi * dCi
+        dL1 = cal_dL(grad_c_move, dc_move)
+        # check cross backward.
+        if a.shape[a_axis] == 2 and b.shape[b_axis] == 2:
+            # Case 1: a.shape[-1] == 2 and b.shape[-1] == 2, param.axisc is ignored.
+            shape = grad_c_move.shape if grad_c_move.ndim != 0 else (1,)
+            grad_a_move = _np.empty(shape, dtype=a_move.dtype)
+            grad_b_move = _np.empty(shape, dtype=b_move.dtype)
+            grad_a_move = _np.expand_dims(grad_a_move, -1).repeat(2, axis=-1)
+            grad_b_move = _np.expand_dims(grad_b_move, -1).repeat(2, axis=-1)
+            a_move_0 = a_move[..., 0]
+            a_move_1 = a_move[..., 1]
+            b_move_0 = b_move[..., 0]
+            b_move_1 = b_move[..., 1]
+            grad_a_move_0 = grad_c_move * b_move_1
+            grad_a_move_1 = grad_c_move * b_move_0
+            if grad_a_move_1.ndim == 0:
+                grad_a_move_1 = -grad_a_move_1
+            else:
+                _np.negative(grad_a_move_1, out=grad_a_move_1)
+            grad_b_move_0 = grad_c_move * a_move_1
+            grad_b_move_1 = grad_c_move * a_move_0
+            if grad_b_move_0.ndim == 0:
+                grad_b_move_0 = -grad_b_move_0
+            else:
+                _np.negative(grad_b_move_0, out=grad_b_move_0)
+            grad_a_move[..., 0] = grad_a_move_0
+            grad_a_move[..., 1] = grad_a_move_1
+            grad_b_move[..., 0] = grad_b_move_0
+            grad_b_move[..., 1] = grad_b_move_1
+        else:
+            # Case 4: a.shape[-1] == 3 and b.shape[-1] == 3, param.axisc is not ignored.
+            grad_a_move = _np.cross(b_move, grad_c_move)
+            grad_b_move = _np.cross(grad_c_move, a_move)
+            if a.shape[a_axis] == 2:
+                # Case 2: a.shape[-1] == 2 and b.shape[-1] == 3, param.axisc is not ignored.
+                grad_a_move = _np.delete(grad_a_move, obj=-1, axis=-1)
+            if b.shape[b_axis] == 2:
+                # Case 3: a.shape[-1] == 3 and b.shape[-1] == 2, param.axisc is not ignored.
+                grad_b_move = _np.delete(grad_b_move, obj=-1, axis=-1)
+
+        if not check_not_use_broadcast(a, b, axises):
+            a_broad_axis = get_reduce_axis(a_move.shape, c_move.shape)
+            b_broad_axis = get_reduce_axis(b_move.shape, c_move.shape)
+            if a_broad_axis is not None:
+                grad_a_move_reduce = _np.ones_like(a_move)
+                grad_a_move_reduce = _np.sum(grad_a_move, axis=a_broad_axis, out=grad_a_move_reduce, keepdims=True)
+                grad_a_move = grad_a_move_reduce
+            if b_broad_axis is not None:
+                grad_b_move_reduce = _np.ones_like(b_move)
+                grad_b_move_reduce = _np.sum(grad_b_move, axis=b_broad_axis, out=grad_b_move_reduce, keepdims=True)
+                grad_b_move = grad_b_move_reduce
+        # dL2 = dL/dAi * dAi + dL/dBi * dBi
+        dL2 = cal_dL(grad_a_move, da_move) + cal_dL(grad_b_move, db_move)
+        assert_almost_equal(dL1, dL2, rtol=rtol, atol=atol)
+        # move working axis
+        return _np.moveaxis(grad_a_move, -1, a_axis), _np.moveaxis(grad_b_move, -1, b_axis)
+
     shapes = [
-        # (a_shape, b_shape, (a_axis, b_axis, c_axis))
+        # - (a_shape, b_shape, None)
+        # - (a_shape, b_shape, (a_axis, b_axis, c_axis))
+        # - (a_shape, b_shape, (a_axis, b_axis, c_axis, axis))
         ((2,), (2,), (-1, -1, -1)),
         ((1, 2), (1, 2), (-1, -1, -1)),
         ((1, 2), (2, 2), (-1, -1, -1)),
@@ -7603,19 +7713,26 @@ def test_np_cross():
         ((6, 3, 5, 4), (6, 5, 3, 4), (1, 2, 0)),
         ((6, 3, 1, 4), (1, 5, 3, 4), (1, 2, 0)),
 
+        ((2,), (2,), None),
+        ((2,), (3,), None),
+        ((3,), (2,), None),
+        ((3,), (3,), None),
         ((5, 4, 3, 2), (5, 4, 3, 2), None),
         ((6, 5, 4, 2), (6, 5, 4, 3), None),
         ((6, 5, 4, 3), (6, 5, 4, 2), None),
         ((6, 5, 4, 3), (6, 5, 4, 3), None),
 
-        # (a_shape, b_shape, (a_axis, b_axis, c_axis, axis))
+        ((1, 4, 3, 2), (5, 1, 3, 2), None),
+        ((6, 1, 4, 2), (6, 5, 1, 3), None),
+        ((6, 5, 1, 3), (1, 5, 4, 2), None),
+        ((1, 5, 4, 3), (6, 5, 1, 3), None),
+
         ((2, 5, 4, 3), (2, 5, 4, 3), (-1, -1, -1, 0,)),
         ((6, 2, 5, 4), (6, 3, 5, 4), (-1, -1, -1, 1,)),
         ((6, 5, 3, 4), (6, 5, 2, 4), (-1, -1, -1, 2,)),
         ((6, 5, 4, 3), (6, 5, 4, 3), (-1, -1, -1, 3,)),
     ]
     dtypes = [np.float32, np.float64]
-
     for hybridize in [True, False]:
         for shape, dtype in itertools.product(shapes, dtypes):
             rtol = 1e-3
@@ -7635,12 +7752,19 @@ def test_np_cross():
             b_np = _np.random.uniform(-10., 10., size=b_shape)
             a = np.array(a_np, dtype=dtype)
             b = np.array(b_np, dtype=dtype)
+            a.attach_grad()
+            b.attach_grad()
 
             # check cross validity
-            mx_out = test_numpy_cross(a, b)
+            with mx.autograd.record():
+                mx_out = test_numpy_cross(a, b)
             check_np_cross(mx_out, a.asnumpy(), b.asnumpy(), axises)
 
-            # check cross validity
+            # check cross backward
+            mx.autograd.backward(mx_out)
+            grad_a_expected, grad_b_expected = get_cross_backward(a.asnumpy(), b.asnumpy(), axises)
+
+            # check imperative once again
             mx_out = test_numpy_cross(a, b)
             check_np_cross(mx_out, a.asnumpy(), b.asnumpy(), axises)
 
