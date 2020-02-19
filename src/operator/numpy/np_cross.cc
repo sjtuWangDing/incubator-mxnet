@@ -45,8 +45,10 @@ inline bool NumpyCrossShape(const nnvm::NodeAttrs& attrs,
     const int b_ndim = b_shape.ndim();
     CHECK_GE(a_ndim, 1) << "Array must be at least one-dimensional";
     CHECK_GE(b_ndim, 1) << "Array must be at least one-dimensional";
-    CHECK_LE(a_ndim, 6) << "cross product support at most 6 dimensions";
-    CHECK_LE(b_ndim, 6) << "cross product support at most 6 dimensions";
+    CHECK_LE(a_ndim, broadcast::MAX_DIM)
+      << "cross product support at most " << broadcast::MAX_DIM << " dimensions";
+    CHECK_LE(b_ndim, broadcast::MAX_DIM)
+      << "cross product support at most " << broadcast::MAX_DIM << " dimensions";
 
     const Tuple<int> a_moveaxis_index = GetMoveaxisIndex(param.axisa, -1, a_shape);
     const Tuple<int> b_moveaxis_index = GetMoveaxisIndex(param.axisb, -1, b_shape);

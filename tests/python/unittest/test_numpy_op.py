@@ -7586,7 +7586,7 @@ def test_np_cross():
     # get reduced axis index
     def get_reduce_axis(shape, broad_shape):
         axis = list()
-        length = len(broad_shape) if len(shape) == len(broad_shape) + 1 else len(shape) - 1
+        length = len(broad_shape) if len(shape) == len(broad_shape) + 1 else len(broad_shape) - 1
         for i in range(length):
             if shape[i] != broad_shape[i]:
                 axis.append(i)
@@ -7602,7 +7602,7 @@ def test_np_cross():
             (a_axis, b_axis, c_axis) = axises
         c = _np.cross(a, b, axisa=a_axis, axisb=b_axis, axisc=c_axis)
         c_move = _np.moveaxis(c, c_axis, -1) if a.shape[a_axis] == 3 or b.shape[b_axis] == 3 else c
-        grad_c_move = _np.random.uniform(-1., 1., size=c_move.shape)
+        grad_c_move = _np.ones(shape=c_move.shape, dtype=c_move.dtype)
         a_move = _np.moveaxis(a, a_axis, -1)
         b_move = _np.moveaxis(b, b_axis, -1)
         da_move = _np.random.uniform(-1., 1., size=a_move.shape)
@@ -7689,6 +7689,10 @@ def test_np_cross():
         ((2,), (3,), (-1, -1, -1)),
         ((1, 2,), (1, 3,), (-1, -1, -1)),
         ((2, 2,), (2, 3,), (0, -1, 0)),
+        ((1, 2,), (2, 3,), (-1, -1, -1)),
+        ((2, 2,), (1, 3,), (-1, -1, -1)),
+        ((2, 1,), (3, 4,), (0, 0, 0)),
+        ((2, 1, 3), (4, 3, 1), (0, 1, 2)),
         ((6, 5, 4, 2), (6, 5, 4, 3), (-1, -1, -1)),
         ((2, 6, 5, 4), (6, 5, 4, 3), (0, -1, 2)),
         ((2, 6, 5, 4), (6, 3, 5, 4), (0, 1, 2)),
@@ -7698,6 +7702,10 @@ def test_np_cross():
         ((3,), (2,), (-1, -1, -1)),
         ((1, 3,), (1, 2,), (-1, -1, -1)),
         ((2, 3,), (2, 2,), (-1, 0, 0)),
+        ((2, 3,), (1, 2,), (-1, -1, -1)),
+        ((2, 3,), (1, 2,), (-1, -1, -1)),
+        ((3, 4, 4), (1, 1, 2,), (0, -1, 0)),
+        ((3, 4, 4), (1, 2, 1,), (0, 1, 2)),
         ((6, 5, 4, 3), (6, 5, 4, 2), (-1, -1, -1)),
         ((3, 6, 5, 4), (6, 5, 4, 2), (0, -1, 2)),
         ((3, 6, 5, 4), (6, 2, 5, 4), (0, 1, 2)),
@@ -7707,11 +7715,15 @@ def test_np_cross():
         ((3,), (3,), (-1, -1, -1)),
         ((1, 3,), (1, 3,), (-1, -1, -1)),
         ((2, 3,), (3, 2,), (-1, 0, 0)),
+        ((1, 3,), (3, 2,), (-1, 0, 0)),
+        ((1, 3,), (3, 4,), (-1, 0, 0)),
+        ((1, 1, 3,), (3, 2, 2), (-1, 0, 0)),
+        ((1, 1, 2, 3,), (3, 2, 2, 2), (-1, 0, 0)),
         ((6, 5, 4, 3), (6, 5, 4, 3), (-1, -1, -1)),
         ((3, 6, 5, 4), (6, 5, 4, 3), (0, -1, 2)),
         ((3, 6, 5, 4), (6, 3, 5, 4), (0, 1, 2)),
         ((6, 3, 5, 4), (6, 5, 3, 4), (1, 2, 0)),
-        ((6, 3, 1, 4), (1, 5, 3, 4), (1, 2, 0)),
+        ((6, 3, 1, 4), (1, 5, 3, 4), (1, 2, -1)),
 
         ((2,), (2,), None),
         ((2,), (3,), None),
@@ -7732,13 +7744,16 @@ def test_np_cross():
         ((6, 5, 3, 4), (6, 5, 2, 4), (-1, -1, -1, 2,)),
         ((6, 5, 4, 3), (6, 5, 4, 3), (-1, -1, -1, 3,)),
     ]
-    dtypes = [np.float32, np.float64]
-    for hybridize in [True, False]:
+    # dtypes = [np.float32, np.float64]
+    # for hybridize in [True, False]:
+    dtypes = [np.float32]
+    for hybridize in [False]:
         for shape, dtype in itertools.product(shapes, dtypes):
             rtol = 1e-3
             atol = 1e-5
             a_shape, b_shape, axises = shape
             if axises is None:
+                a_axis, b_axis, c_axis = (-1,) * 3
                 test_numpy_cross = TestNumpyCross()
             elif len(axises) == 4:
                 (a_axis, b_axis, c_axis, axis,) = axises
@@ -7761,8 +7776,51 @@ def test_np_cross():
             check_np_cross(mx_out, a.asnumpy(), b.asnumpy(), axises)
 
             # check cross backward
-            mx.autograd.backward(mx_out)
+            if axises == None:
+                a_axis, b_axis, c_axis = (-1,) * 3
+            elif len(axises) == 4:
+                a_axis, b_axis, c_axis = (axises[-1],) * 3
+            else:
+                (a_axis, b_axis, c_axis) = axises
             grad_a_expected, grad_b_expected = get_cross_backward(a.asnumpy(), b.asnumpy(), axises)
+            if check_not_use_broadcast(a, b, axises):
+                if a.shape[a_axis] == 2 and b.shape[b_axis] == 3:
+                    # pass
+                    print("####################################")
+                    mx.autograd.backward(mx_out)
+                    assert_almost_equal(a.grad.asnumpy(), grad_a_expected, rtol=rtol, atol=atol)
+                    assert_almost_equal(b.grad.asnumpy(), grad_b_expected, rtol=rtol, atol=atol)
+                elif a.shape[a_axis] == 3 and b.shape[b_axis] == 2:
+                    # pass
+                    print("####################################")
+                    mx.autograd.backward(mx_out)
+                    assert_almost_equal(a.grad.asnumpy(), grad_a_expected, rtol=rtol, atol=atol)
+                    assert_almost_equal(b.grad.asnumpy(), grad_b_expected, rtol=rtol, atol=atol)
+                elif a.shape[a_axis] == 3 and b.shape[b_axis] == 3:
+                    # pass
+                    print("####################################")
+                    mx.autograd.backward(mx_out)
+                    assert_almost_equal(a.grad.asnumpy(), grad_a_expected, rtol=rtol, atol=atol)
+                    assert_almost_equal(b.grad.asnumpy(), grad_b_expected, rtol=rtol, atol=atol)
+            else:
+                if a.shape[a_axis] == 2 and b.shape[b_axis] == 3:
+                    # pass
+                    print("####################################")
+                    mx.autograd.backward(mx_out)
+                    assert_almost_equal(a.grad.asnumpy(), grad_a_expected, rtol=rtol, atol=atol)
+                    assert_almost_equal(b.grad.asnumpy(), grad_b_expected, rtol=rtol, atol=atol)
+                elif a.shape[a_axis] == 3 and b.shape[b_axis] == 2:
+                    # pass
+                    print("####################################")
+                    mx.autograd.backward(mx_out)
+                    assert_almost_equal(a.grad.asnumpy(), grad_a_expected, rtol=rtol, atol=atol)
+                    assert_almost_equal(b.grad.asnumpy(), grad_b_expected, rtol=rtol, atol=atol)
+                elif a.shape[a_axis] == 3 and b.shape[b_axis] == 3:
+                    # pass
+                    print("####################################")
+                    mx.autograd.backward(mx_out)
+                    assert_almost_equal(a.grad.asnumpy(), grad_a_expected, rtol=rtol, atol=atol)
+                    assert_almost_equal(b.grad.asnumpy(), grad_b_expected, rtol=rtol, atol=atol)
 
             # check imperative once again
             mx_out = test_numpy_cross(a, b)
